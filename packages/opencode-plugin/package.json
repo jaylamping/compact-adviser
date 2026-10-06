@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome check --write .",
-    "build": "bun build src/plugin.ts --outfile dist/compact-adviser.js --target bun --format esm --external @opencode-ai/plugin",
+    "build": "bun build src/plugin.ts --outfile dist/compact-adviser.js --target bun --format esm --external @opencode-ai/plugin --banner \"// compact-adviser for OpenCode, built from github.com/jaylamping/compact-adviser (packages/opencode-plugin, branch desktop-attended). Rebuild: npm ci && npm run build, then copy dist/compact-adviser.js here. Settings: ~/.config/opencode/compact-adviser.json (see that package's README).\"",
     "check": "npm run typecheck && npm run lint && npm test && npm run build"
   },
   "devDependencies": {
