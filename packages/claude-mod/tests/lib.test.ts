@@ -14,6 +14,7 @@ import {
   ENDPOINT,
   FLOOR_MAX,
   FLOOR_MIN,
+  fitState,
   floorFor,
   JUDGE_DISABLED_NETWORK_MESSAGE,
   JUDGE_UNAVAILABLE_MESSAGE,
@@ -37,12 +38,13 @@ import {
   requestLogPath,
   responseLogLine,
 } from "../lib/log.ts";
-import { RECENT_TAIL_MESSAGES, SUMMARY_PREFIX, snapshot } from "../lib/snapshot.ts";
+import { RECENT_TAIL_MESSAGES, redact, SUMMARY_PREFIX, snapshot } from "../lib/snapshot.ts";
 import {
   backoff,
   completeExchange,
   cooldownReason,
   initialState,
+  MAX_BACKOFF_MS,
   restoreState,
   SESSION_RETENTION_MS,
   staleSessionKeys,
@@ -736,5 +738,82 @@ describe("jev client", () => {
       "/home/fixture/.claude/compact-adviser-requests-_secret.jsonl",
     );
     expect(requestLogName("")).toBe("compact-adviser-requests-session.jsonl");
+  });
+});
+
+describe("windows and oversized sessions", () => {
+  test("a long session full of Windows paths is shrunk under the request cap, not refused", () => {
+    const path = "C:\\Users\\dev\\project\\src\\module\\file.ts";
+    const messages = Array.from({ length: 600 }, (_, i) => ({
+      role: (i % 2 ? "assistant" : "user") as "user" | "assistant",
+      text: `Step ${i}: edited "${path}" and ran\n\t"${path}" again. `.repeat(6),
+      toolUses:
+        i % 2
+          ? Array.from({ length: 8 }, (_, k) => ({
+              tool: "Read",
+              input: { file_path: `${path}.${k}` },
+              text: `${path}\n`.repeat(20),
+            }))
+          : [],
+    }));
+    const view = snapshot(messages);
+    expect(() => requestBody(view.state)).toThrow();
+    const fitted = fitState(view.state);
+    const body = requestBody(fitted);
+    expect(new TextEncoder().encode(body).byteLength <= MAX_REQUEST_BYTES).toBe(true);
+    expect(fitted.recent.length > 0).toBe(true);
+    expect(fitted.recent.at(-1)).toEqual(view.state.recent.at(-1));
+    expect(fitted.coverage.recentTextTruncated).toBe(true);
+    expect(fitted.coverage.olderMessagesOmitted > view.state.coverage.olderMessagesOmitted).toBe(
+      true,
+    );
+    // The caller's state is left as it was.
+    expect(() => requestBody(view.state)).toThrow();
+  });
+
+  test("a state that already fits comes back unchanged", () => {
+    const view = snapshot(longConversation());
+    expect(fitState(view.state)).toBe(view.state);
+  });
+
+  test("credentials in common shapes are redacted; ordinary prose is not", () => {
+    for (const [input, secret] of [
+      ['{"API_KEY": "s3cret-value"}', "s3cret-value"],
+      ["password=hunter2", "hunter2"],
+      ["AWS_SECRET_ACCESS_KEY=AKIAexample123", "AKIAexample123"],
+      ["setx TYPESAFE_API_KEY tsk-setx-value", "tsk-setx-value"],
+      ['$env:TYPESAFE_API_KEY = "tsk-ps-value"', "tsk-ps-value"],
+      ["[Environment]::SetEnvironmentVariable('GITHUB_TOKEN', 'gt-value', 'User')", "gt-value"],
+      ['{\\"compact-adviser.typesafeApiKey\\": \\"tsk-escaped\\"}', "tsk-escaped"],
+      ["client_secret: cs-value", "cs-value"],
+    ] as const) {
+      const out = redact(input);
+      expect(out.redacted).toBe(true);
+      expect(out.text.includes(secret)).toBe(false);
+    }
+    for (const prose of [
+      "Context tokens: 52000 of 200000",
+      "max_tokens: 4096",
+      "The secretary approved it.",
+      "Done: 12 of 12 tests pass.",
+    ]) {
+      expect(redact(prose)).toEqual({ text: prose, redacted: false });
+    }
+  });
+
+  test(".env inline comments and UTF-16 files still yield the key", () => {
+    expect(parseDotenvKey("TYPESAFE_API_KEY=tsk-a # prod", "TYPESAFE_API_KEY")).toBe("tsk-a");
+    expect(parseDotenvKey('TYPESAFE_API_KEY="tsk-#b" # c', "TYPESAFE_API_KEY")).toBe("tsk-#b");
+    expect(parseDotenvKey('TYPESAFE_API_KEY="tsk-#b"', "TYPESAFE_API_KEY")).toBe("tsk-#b");
+    const utf16 = `\uFFFD\uFFFD${[..."TYPESAFE_API_KEY=tsk-utf16\r\n"].map((c) => `${c}\u0000`).join("")}`;
+    expect(parseDotenvKey(utf16, "TYPESAFE_API_KEY")).toBe("tsk-utf16");
+  });
+
+  test("a stored backoff never runs past the longest backoff from now", () => {
+    const now = 1_000_000;
+    const skewed = { ...initialState(false, now), retryAfter: now + 86_400_000 };
+    expect(restoreState(skewed, now).retryAfter).toBe(now + MAX_BACKOFF_MS);
+    const ordinary = { ...initialState(false, now), retryAfter: now + 5000 };
+    expect(restoreState(ordinary, now).retryAfter).toBe(now + 5000);
   });
 });

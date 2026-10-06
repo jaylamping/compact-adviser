@@ -90,6 +90,10 @@ export type WorldOptions = {
   base?: string;
   /** `CLAUDE_CODE_SESSION_ATTENDED`, set by SDK hosts with a person at the window. */
   attended?: string;
+  /** `HOME`; null leaves it unset, as the Windows desktop app does. */
+  home?: string | null;
+  /** `USERPROFILE`, the Windows home directory; omit to leave it unset. */
+  userProfile?: string;
   consent?: { autoAcknowledged: boolean } | "absent" | unknown;
   mode?: string;
   minimum?: number;
@@ -133,15 +137,14 @@ export function world(on: On, options: WorldOptions = {}): World {
   const key = "key" in options ? options.key : KEY;
   mock.env(on, {
     // Claude Code rejects host filesystem paths under macOS automounts such as /home.
-    HOME: "/tmp/fixture-home",
+    ...(options.home === null ? {} : { HOME: options.home ?? "/tmp/fixture-home" }),
+    ...(options.userProfile === undefined ? {} : { USERPROFILE: options.userProfile }),
     ...(functionHooks === undefined ? {} : { CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: functionHooks }),
     ...(key === undefined ? {} : { TYPESAFE_API_KEY: key }),
     ...(options.endpoint === undefined ? {} : { COMPACT_ADVISER_TEST_ENDPOINT: options.endpoint }),
     ...(options.disable === undefined ? {} : { COMPACT_ADVISER_DISABLE: options.disable }),
     ...(options.base === undefined ? {} : { TYPESAFE_BASE: options.base }),
-    ...(options.attended === undefined
-      ? {}
-      : { CLAUDE_CODE_SESSION_ATTENDED: options.attended }),
+    ...(options.attended === undefined ? {} : { CLAUDE_CODE_SESSION_ATTENDED: options.attended }),
   });
   const consent = "consent" in options ? options.consent : "absent";
   // The plugin store, in memory and visible to the test.
@@ -303,7 +306,7 @@ export function world(on: On, options: WorldOptions = {}): World {
   });
   on("ui.open", async (_$, e) => {
     journal.opened.push({ id: e.id, focus: e.focus });
-    return { value: undefined };
+    return { value: undefined } as never;
   });
   on("ui.close", async (_$, e) => {
     journal.closed.push(e.id);
@@ -315,7 +318,8 @@ export function world(on: On, options: WorldOptions = {}): World {
     return { isShown: true };
   });
   on("fs.read", async (_$, e, next) => {
-    const envFile = e.path === ".env" || e.path.endsWith("/.env");
+    // The engine may hand the hook a resolved path, `C:\...\.env` on Windows.
+    const envFile = /(^|[\\/])\.env$/.test(e.path);
     if (envFile) journal.fsReads.push(e.path);
     if (envFile && options.dotenv !== undefined) return { value: options.dotenv };
     if (/compact-adviser-requests[^/]*\.jsonl$/.test(String(e.path))) {

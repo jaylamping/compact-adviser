@@ -46,6 +46,7 @@ import {
 import {
   contextPressure,
   effectiveBudget,
+  fitState,
   floorFor,
   JUDGE_DISABLED_NETWORK_MESSAGE,
   JUDGE_UNAVAILABLE_MESSAGE,
@@ -90,6 +91,9 @@ let activation: Promise<boolean> | undefined;
 // The host-validated options this environment loaded with (a save reloads it with new ones).
 let loadedOptions: PluginOptions = {};
 let interactive = false;
+// Active through CLAUDE_CODE_SESSION_ATTENDED rather than the REPL: an SDK host such as the
+// desktop app draws the session, and no terminal does.
+let sdkHost = false;
 let generation = 0;
 let judging = false;
 let compacting = false;
@@ -150,13 +154,16 @@ async function resolvedKey($: EngineInterface) {
   }
   const saved = readSavedApiKey(await $.config.list(), loadedOptions);
   if (saved) return resolveTypesafeApiKey(undefined, saved);
-  let dotenv: string | undefined;
+  return resolveTypesafeApiKey(undefined, undefined, await dotenvKey($));
+}
+
+/** TYPESAFE_API_KEY from the session cwd's `.env`, whether or not it is the key in effect. */
+async function dotenvKey($: EngineInterface): Promise<string | undefined> {
   try {
-    dotenv = parseDotenvKey(await $.fs.read(".env"), "TYPESAFE_API_KEY");
+    return parseDotenvKey(await $.fs.read(".env"), "TYPESAFE_API_KEY");
   } catch {
-    dotenv = undefined;
+    return undefined;
   }
-  return resolveTypesafeApiKey(undefined, undefined, dotenv);
 }
 
 async function apiKey($: EngineInterface): Promise<string> {
@@ -203,22 +210,38 @@ function judgeFailureMessage(error: unknown): string {
   return error instanceof JudgeError ? error.message : JUDGE_UNAVAILABLE_MESSAGE;
 }
 
-async function logHome($: EngineInterface): Promise<string> {
-  return ((await $.env.get("HOME")) ?? (await $.session.cwd())).replace(/[\\/]+$/, "");
+/**
+ * The home directory the request log lives under: HOME, else USERPROFILE (Windows sets no
+ * HOME for the desktop app). Never the session cwd, where excerpts of the conversation
+ * would land inside the project and could be committed.
+ */
+async function logHome($: EngineInterface): Promise<string | undefined> {
+  for (const value of [await $.env.get("HOME"), await $.env.get("USERPROFILE")]) {
+    const home = value?.trim().replace(/[\\/]+$/, "");
+    if (home) return home;
+  }
+  return undefined;
 }
 
-async function sessionLogPath($: EngineInterface): Promise<string> {
-  return requestLogPath(await logHome($), await $.session.id());
+async function sessionLogPath($: EngineInterface): Promise<string | undefined> {
+  const home = await logHome($);
+  return home === undefined ? undefined : requestLogPath(home, await $.session.id());
 }
+
+const NO_LOG_HOME = "unavailable (neither HOME nor USERPROFILE is set)";
+/** One log file is rewritten whole on each append, so it starts over past this size. */
+const MAX_LOG_CHARS = 2_000_000;
 
 async function appendTypeSafeLog($: EngineInterface, line: string): Promise<void> {
   const path = await sessionLogPath($);
+  if (path === undefined) return;
   let existing = "";
   try {
     existing = await $.fs.read(path);
   } catch {
     existing = "";
   }
+  if (existing.length + line.length > MAX_LOG_CHARS) existing = "";
   await $.fs.write(path, `${existing}${line}`);
 }
 
@@ -226,6 +249,31 @@ function notice($: EngineInterface, message: string): void {
   if (diagnostic === message) return;
   diagnostic = message;
   $.ui.toast(message, { timeoutMs: 8000 });
+}
+
+/**
+ * Whether the session draws somewhere other than a terminal (the desktop app, an editor, a
+ * phone). An SDK host such as the desktop app may report no surface at all, which counts:
+ * the status line and the settings pane are terminal furniture.
+ */
+async function drawsBeyondTerminal($: EngineInterface): Promise<boolean> {
+  if (sdkHost) return true;
+  try {
+    const surfaces = await $.session.surfaces();
+    return surfaces.length === 0 || surfaces.some((surface) => surface !== "terminal");
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a terminal draws the session, so the settings pane can be shown. */
+async function hasTerminal($: EngineInterface): Promise<boolean> {
+  if (sdkHost) return false;
+  try {
+    return (await $.session.surfaces()).includes("terminal");
+  } catch {
+    return true;
+  }
 }
 
 function clearStatus($: EngineInterface): void {
@@ -289,19 +337,22 @@ async function judgeCheckpoint($: EngineInterface, epoch: number): Promise<void>
   try {
     const initial = await loadConfig($);
     const profile = parseProfile(initial.profile);
-    const [messages, activeKey, rows] = await Promise.all([
+    const [messages, activeKey, rows, fileKey] = await Promise.all([
       $.session.messages(),
       apiKey($),
       $.config.list(),
+      dotenvKey($),
     ]);
-    const view = snapshot(messages, [activeKey, readSavedApiKey(rows, loadedOptions)]);
+    // Every key the session can see is scrubbed, not just the one in effect.
+    const view = snapshot(messages, [activeKey, readSavedApiKey(rows, loadedOptions), fileKey]);
     if (view.conversationTokens <= 20000) return;
     const fingerprint = await checkpointKey(view.checkpointText);
     if ((await loadState($)).state.lastHintKey === fingerprint) return;
+    const judgeState = fitState(view.state, profile);
     let loggedBody: string | undefined;
     if (initial.logRequests) {
       try {
-        loggedBody = requestBody(view.state, profile);
+        loggedBody = requestBody(judgeState, profile);
         await appendTypeSafeLog($, requestLogLine(loggedBody));
       } catch {
         // Request logging must not replace or delay the judgment.
@@ -311,7 +362,7 @@ async function judgeCheckpoint($: EngineInterface, epoch: number): Promise<void>
     try {
       const endpoint = await judgeEndpoint($);
       result = await judge(
-        view.state,
+        judgeState,
         await apiKey($),
         {
           fetch: (url, init) => $.http.fetch(url, init),
@@ -336,15 +387,18 @@ async function judgeCheckpoint($: EngineInterface, epoch: number): Promise<void>
     }
     if (epoch !== generation) return;
     const latest = await loadConfig($);
-    const { key, state: current } = await loadState($);
+    const { key, state: stored } = await loadState($);
     const now = await $.clock.now();
+    // A judgment came back, so the backoff ladder restarts whatever the gate decides next.
+    const current: SessionState = { ...stored, failures: 0, retryAfter: 0, updatedAt: now };
+    if (stored.failures !== 0 || stored.retryAfter !== 0) await $.store.set(key, current);
     const { context } = await $.session.usage({ breakdown: "summary" });
     if (initial.logRequests) {
       try {
         await appendTypeSafeLog(
           $,
           responseLogLine(
-            loggedBody ?? requestBody(view.state, profile),
+            loggedBody ?? requestBody(judgeState, profile),
             result,
             usageFraction(context, latest.contextBudgetTokens),
             undefined,
@@ -361,7 +415,7 @@ async function judgeCheckpoint($: EngineInterface, epoch: number): Promise<void>
       !(await eligible($, latest, current, context.tokens, now))
     )
       return;
-    let state: SessionState = { ...current, failures: 0, retryAfter: 0, updatedAt: now };
+    let state: SessionState = current;
     const auto = latest.mode === "auto";
     if (
       !qualifies(result, usageFraction(context, latest.contextBudgetTokens), profile) ||
@@ -378,6 +432,11 @@ async function judgeCheckpoint($: EngineInterface, epoch: number): Promise<void>
       hintVisible = true;
       // Claude Code prefixes $.ui.status with the plugin name; do not repeat it.
       $.ui.status(HINT);
+      // The desktop and other app surfaces may draw no status line; say it where they look.
+      if (await drawsBeyondTerminal($)) {
+        $.ui.toast(HINT, { timeoutMs: 10000 });
+        $.ui.log(HINT);
+      }
       return;
     }
     await $.store.set(key, state);
@@ -511,8 +570,8 @@ async function saveConsent($: EngineInterface, patch: Partial<Omit<Consent, "ver
   diagnostic = "";
 }
 
-function openPane($: EngineInterface): Promise<void> {
-  return $.ui.open({
+async function openPane($: EngineInterface): Promise<void> {
+  await $.ui.open({
     id: PANE_ID,
     title: "Compact adviser (saved for all sessions)",
     focus: true,
@@ -649,10 +708,12 @@ async function changeBudget($: EngineInterface, text: string): Promise<boolean> 
 /** Validates and saves a minimum; throws the validation message for the caller to show. */
 async function changeMinimum($: EngineInterface, text: string): Promise<boolean> {
   const count = text === "default" ? DEFAULT_MINIMUM : parseMinimum(text);
-  const { context } = await $.session.usage();
+  const { context } = await $.session.usage({ breakdown: "summary" });
+  // Claude Code compacts at its own threshold, below the window, when auto-compact is on.
+  const limit = contextLimit(context);
   const warning =
-    count >= context.window
-      ? ` Warning: this is at or above the active model's ${formatTokens(context.window)}-token window, so advice will not trigger before Claude Code's own compaction.`
+    count >= limit
+      ? ` Warning: this is at or above the ${formatTokens(limit)}-token point where Claude Code compacts on its own, so advice will not trigger first.`
       : "";
   return saveRow(
     $,
@@ -668,7 +729,7 @@ async function changeLogRequests($: EngineInterface, enabled: boolean): Promise<
     LOG_KEY,
     enabled,
     enabled
-      ? `TypeSafe request logging on (all sessions). ${await sessionLogPath($)}`
+      ? `TypeSafe request logging on (all sessions). ${(await sessionLogPath($)) ?? NO_LOG_HOME}`
       : "TypeSafe request logging off (all sessions).",
   );
 }
@@ -710,7 +771,7 @@ async function statusText($: EngineInterface): Promise<string> {
       : "Waiting for fresh model usage.";
   const budget = config.contextBudgetTokens;
   const fraction = usageFraction(usage.context, budget);
-  return `Mode: ${config.mode}${config.mode === "auto" && !config.autoAcknowledged ? " (not confirmed)" : ""}. Minimum: ${formatTokens(config.minContextTokens)} tokens. Budget: ${budget > 0 ? `${formatTokens(budget)} tokens` : "off"}. Context: ${typeof tokens === "number" ? formatTokens(tokens) : "unknown"}${Number.isFinite(fraction) ? ` (${Math.round(fraction * 100)}% of the ${effectiveBudget(contextLimit(usage.context), budget) > 0 ? "budget" : "context limit"}; hint floor ${floorFor(fraction, parseProfile(config.profile)).toFixed(2)})` : ""}. ${formatKeyStatus((await resolvedKey($)).source)}. ${cooldown}${engine} Request log: ${config.logRequests ? await sessionLogPath($) : "off"}. Settings: /config (compact-adviser rows) and /compact-adviser.`;
+  return `Mode: ${config.mode}${config.mode === "auto" && !config.autoAcknowledged ? " (not confirmed)" : ""}. Minimum: ${formatTokens(config.minContextTokens)} tokens. Budget: ${budget > 0 ? `${formatTokens(budget)} tokens` : "off"}. Context: ${typeof tokens === "number" ? formatTokens(tokens) : "unknown"}${Number.isFinite(fraction) ? ` (${Math.round(fraction * 100)}% of the ${effectiveBudget(contextLimit(usage.context), budget) > 0 ? "budget" : "context limit"}; hint floor ${floorFor(fraction, parseProfile(config.profile)).toFixed(2)})` : ""}. ${formatKeyStatus((await resolvedKey($)).source)}. ${cooldown}${engine} Request log: ${config.logRequests ? ((await sessionLogPath($)) ?? NO_LOG_HOME) : "off"}. Settings: /config (compact-adviser rows) and /compact-adviser.`;
 }
 
 async function snoozeOrDismiss($: EngineInterface, command: "snooze" | "dismiss") {
@@ -737,6 +798,7 @@ export const register: Register = (on, options) => {
   on("session.start", async ($, e, next) => {
     if (!(await isActivated($))) return next(e);
     interactive = await isAttended($, e.isInteractive);
+    sdkHost = interactive && !e.isInteractive;
     if (!interactive) return next(e);
     generation++;
     judging = false;
@@ -805,6 +867,10 @@ export const register: Register = (on, options) => {
     const [command = "", ...rest] = e.args.trim().split(/\s+/);
     const value = rest.join(" ");
     try {
+      if (!command && !(await hasTerminal($))) {
+        // Only a terminal draws the settings pane; elsewhere the settings are the arguments.
+        return { text: `${await statusText($)}\n\n${USAGE}` };
+      }
       if (!command) {
         showMenu("menu:mode");
         statusDetails = undefined;

@@ -7,6 +7,7 @@ import {
   judgeErrorMessage,
   parseJudgment,
   score,
+  TIMEOUT_MS,
 } from "../lib/judge.ts";
 import { RECENT_TAIL_MESSAGES } from "../lib/snapshot.ts";
 import { SESSION_RETENTION_MS } from "../lib/state.ts";
@@ -338,7 +339,7 @@ describe("turn-end gates", () => {
     });
     await $.session.start(interactiveStart);
     await turnEnd($, w);
-    expect(w.journal.fsReads.some((path) => path === ".env" || path.endsWith("/.env"))).toBe(true);
+    expect(w.journal.fsReads.some((path) => /(^|[\\/])\.env$/.test(path))).toBe(true);
     expect(w.journal.requests).toHaveLength(1);
     expect(w.journal.requests[0]?.headers.Authorization).toBe("Bearer from-dotenv-last");
     expect(w.journal.requests[0]?.body.includes("from-dotenv-last")).toBe(false);
@@ -346,9 +347,10 @@ describe("turn-end gates", () => {
 
   test("a host env key wins over cwd .env", async ($, on) => {
     const w = world(on, { dotenv: "TYPESAFE_API_KEY=from-dotenv\n" });
+    // The .env key is not in effect, but it is still scrubbed from what TypeSafe sees.
+    w.messages = longConversation("My old key from-dotenv stopped working; finish the parser.");
     await $.session.start(interactiveStart);
     await turnEnd($, w);
-    expect(w.journal.fsReads).toEqual([]);
     expect(w.journal.requests).toHaveLength(1);
     expect(w.journal.requests[0]?.headers.Authorization).toBe(`Bearer ${KEY}`);
     expect(w.journal.requests[0]?.body.includes("from-dotenv")).toBe(false);
@@ -362,7 +364,6 @@ describe("turn-end gates", () => {
     });
     await $.session.start(interactiveStart);
     await turnEnd($, w);
-    expect(w.journal.fsReads).toEqual([]);
     expect(w.journal.requests).toHaveLength(1);
     expect(w.journal.requests[0]?.headers.Authorization).toBe("Bearer from-saved");
     expect(w.journal.requests[0]?.body.includes("from-saved")).toBe(false);
@@ -438,6 +439,49 @@ describe("turn-end gates", () => {
       expect(w.journal.requests).toHaveLength(0);
     });
   }
+
+  test("in the desktop app the hint is also a toast and a transcript line", async ($, on) => {
+    const w = world(on, { attended: "1" });
+    w.respond = async () => ({
+      status: 200,
+      text: JSON.stringify(jevAnswer({ completed: 0.99, handsOn: 1 })),
+    });
+    on("session.attach", async (_$, e) => ({ clientId: e.clientId }));
+    await $.session.start({ cwd: "/work", surface: null, isInteractive: false });
+    await $.session.attach({ surface: "desktop", clientId: "desktop:default" } as never);
+    await turnEnd($, w);
+    expect(hinted(w)).toBe(true);
+    expect(w.journal.toasts).toContain(HINT);
+    expect(w.journal.logs).toContain(HINT);
+  });
+
+  test("in the desktop app a bare /compact-adviser answers with status and usage", async ($, on) => {
+    const w = world(on, { attended: "1" });
+    on("session.attach", async (_$, e) => ({ clientId: e.clientId }));
+    await $.session.start({ cwd: "/work", surface: null, isInteractive: false });
+    await $.session.attach({ surface: "desktop", clientId: "desktop:default" } as never);
+    const result = (await $.command.run(commandRun(""))) as { text?: string };
+    expect(result.text).toContain("Mode: hint");
+    expect(result.text).toContain("Use /compact-adviser");
+    expect(w.journal.opened).toHaveLength(0);
+  });
+
+  test("without HOME the request log goes under USERPROFILE, never the project", async ($, on) => {
+    const w = world(on, { logRequests: true, home: null, userProfile: "/tmp/fixture-profile" });
+    await $.session.start(interactiveStart);
+    await $.command.run(commandRun("status"));
+    expect(w.journal.logs.at(-1)).toContain(
+      "Request log: /tmp/fixture-profile/.claude/compact-adviser-requests-session-1.jsonl",
+    );
+  });
+
+  test("without HOME or USERPROFILE nothing is logged", async ($, on) => {
+    const w = world(on, { logRequests: true, home: null });
+    await $.session.start(interactiveStart);
+    await turnEnd($, w);
+    expect(w.journal.requests).toHaveLength(1);
+    expect(w.journal.fsWrites).toHaveLength(0);
+  });
 
   test("a large static prompt alone is not useful history", async ($, on) => {
     const w = world(on);
@@ -627,12 +671,12 @@ describe("turn-end gates", () => {
     expect(hinted(w)).toBe(false);
   });
 
-  test("a two-second TypeSafe timeout leaves context alone", async ($, on) => {
+  test("a TypeSafe timeout leaves context alone", async ($, on) => {
     const w = world(on);
     w.respond = () => new Promise(() => undefined);
     await $.session.start(interactiveStart);
     await turnEnd($, w);
-    await w.clock.advance(2000);
+    await w.clock.advance(TIMEOUT_MS);
     expect(w.journal.toasts).toContain(judgeErrorMessage("timeout"));
     expect(hinted(w)).toBe(false);
   });
@@ -829,8 +873,16 @@ describe("commands", () => {
     await $.command.run(commandRun("threshold 250000"));
     expect(w.rows.get(`${PLUGIN}.minContextTokens`)).toBe(250000);
     expect(w.journal.toasts.at(-1)).toContain(
-      "at or above the active model's 200,000-token window",
+      "at or above the 167,000-token point where Claude Code compacts on its own",
     );
+  });
+
+  test("a minimum between Claude Code's auto-compact point and the window still warns", async ($, on) => {
+    const w = world(on);
+    await $.session.start(interactiveStart);
+    await $.command.run(commandRun("threshold 180000"));
+    expect(w.rows.get(`${PLUGIN}.minContextTokens`)).toBe(180000);
+    expect(w.journal.toasts.at(-1)).toContain("167,000-token point");
   });
 
   test("a save confirmation survives the hot reload a saved row causes", async ($, on) => {

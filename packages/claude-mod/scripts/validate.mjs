@@ -4,12 +4,14 @@
 import { claudeVersion, PACKAGE, run } from "./common.mjs";
 
 const version = claudeVersion();
-const { status, output } = run(["plugin", "validate", "--strict", PACKAGE]);
+const { status, output: raw } = run(["plugin", "validate", "--strict", PACKAGE]);
+// Newer Claude Code quotes matcher values (`key="..."`); compare without the quotes.
+const output = raw.replace(/="([^"]*)"/g, "=$1");
 const expected = [
   "hooks: session.start, turn.start, turn.complete, session.compact, command.run{command=compact-adviser}, config.describe{key=compact-adviser.typesafeApiKey}, ui.close{id=compact-adviser}, ui.render{component=Pane}",
-  "env reads: CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, COMPACT_ADVISER_DISABLE, COMPACT_ADVISER_TEST_ENDPOINT, HOME, TYPESAFE_API_KEY, TYPESAFE_BASE",
+  "env reads: CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, CLAUDE_CODE_SESSION_ATTENDED, COMPACT_ADVISER_DISABLE, COMPACT_ADVISER_TEST_ENDPOINT, HOME, TYPESAFE_API_KEY, TYPESAFE_BASE, USERPROFILE",
   "env writes: nothing",
-  "$.fs.read (via appendTypeSafeLog, resolvedKey)",
+  "$.fs.read (via appendTypeSafeLog, dotenvKey)",
   "$.fs.write (via appendTypeSafeLog)",
   "Validation passed",
 ];

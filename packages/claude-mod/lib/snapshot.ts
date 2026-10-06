@@ -508,6 +508,32 @@ export function scrubKnownSecrets(
   return { text: clean, redacted };
 }
 
+/**
+ * Between a secret's name and its value: `=` or `:` with optional (and possibly escaped)
+ * quotes around either side, as in `KEY=v`, `"KEY": "v"`, `{\"KEY\": \"v\"}` and
+ * `$env:KEY = "v"`, or a quoted comma as in `SetEnvironmentVariable('KEY', 'v')`.
+ */
+const SECRET_SEPARATOR = String.raw`(\\?["']?\s*[=:]\s*\\?["']?|\\?["']\s*,\s*\\?["'])`;
+/** A value not already redacted, up to the next space, quote, backslash, comma or brace. */
+const SECRET_VALUE = String.raw`(?!\[REDACTED)[^\s"'\\,}]+`;
+/** Environment-style names: any upper-case name ending in or containing KEY, TOKEN, SECRET or PASSWORD. */
+const ENV_SECRET = new RegExp(
+  String.raw`\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)` +
+    SECRET_SEPARATOR +
+    SECRET_VALUE,
+  "g",
+);
+/** Common credential names in any case (`password=`, `apiKey:`, `client_secret`). */
+const NAMED_SECRET = new RegExp(
+  String.raw`\b([A-Za-z0-9_-]*?(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?key|token))` +
+    SECRET_SEPARATOR +
+    SECRET_VALUE,
+  "gi",
+);
+/** Windows `setx NAME value`, whose name and value are separated by a space alone. */
+const SETX_SECRET =
+  /\b(setx\s+(?:\/m\s+)?[A-Za-z_][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Za-z0-9_]*\s+"?)(?!\[REDACTED)[^\s"]+/gi;
+
 export function redact(text: string): { text: string; redacted: boolean } {
   const fields = redactOwnedSettings(text);
   const clean = fields.text
@@ -516,10 +542,9 @@ export function redact(text: string): { text: string; redacted: boolean } {
       "[REDACTED PRIVATE KEY]",
     )
     .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{15,}|Bearer\s+\S+)/gi, "[REDACTED]")
-    .replace(
-      /\b([A-Z_]*(?:API_KEY|TOKEN|SECRET|PASSWORD))\s*[=:]\s*["']?[^\s"',}]+/g,
-      "$1=[REDACTED]",
-    );
+    .replace(SETX_SECRET, "$1[REDACTED]")
+    .replace(ENV_SECRET, "$1$2[REDACTED]")
+    .replace(NAMED_SECRET, "$1$2[REDACTED]");
   return { text: clean, redacted: fields.redacted || clean !== fields.text };
 }
 

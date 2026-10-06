@@ -4,6 +4,8 @@
 
 export const SESSION_PREFIX = "session:";
 export const SESSION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+/** The longest TypeSafe backoff `backoff` ever sets. */
+export const MAX_BACKOFF_MS = 300000;
 
 export interface SessionState {
   version: 1;
@@ -64,7 +66,9 @@ export function restoreState(value: unknown, now: number): SessionState {
   ) {
     return { ...initialState(true, now), snoozeUntil: 3 };
   }
-  return { ...(s as SessionState) };
+  // No backoff is ever longer than MAX_BACKOFF_MS; a record from a skewed clock or a
+  // corrupted write must not block judgments past it.
+  return { ...(s as SessionState), retryAfter: Math.min(s.retryAfter, now + MAX_BACKOFF_MS) };
 }
 
 export function cooldownReason(
@@ -100,7 +104,7 @@ export function backoff(state: SessionState, now: number): SessionState {
   return {
     ...state,
     failures,
-    retryAfter: now + Math.min(300000, 5000 * 2 ** failures),
+    retryAfter: now + Math.min(MAX_BACKOFF_MS, 5000 * 2 ** failures),
     updatedAt: now,
   };
 }
