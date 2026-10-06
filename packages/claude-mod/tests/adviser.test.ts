@@ -420,6 +420,25 @@ describe("turn-end gates", () => {
     expect(stored(w)).toBeUndefined();
   });
 
+  test("an attended SDK session (desktop Code tab) is active", async ($, on) => {
+    const w = world(on, { attended: "1" });
+    w.messages = longConversation();
+    await $.session.start({ cwd: "/work", surface: null, isInteractive: false });
+    expect(w.journal.commands).toEqual([PLUGIN]);
+    await turnEnd($, w);
+    expect(w.journal.requests).toHaveLength(1);
+  });
+
+  for (const value of ["0", ""]) {
+    test(`an SDK session with CLAUDE_CODE_SESSION_ATTENDED=${JSON.stringify(value)} stays inert`, async ($, on) => {
+      const w = world(on, { attended: value });
+      await $.session.start({ cwd: "/work", surface: null, isInteractive: false });
+      await turnEnd($, w);
+      expect(w.journal.commands).toHaveLength(0);
+      expect(w.journal.requests).toHaveLength(0);
+    });
+  }
+
   test("a large static prompt alone is not useful history", async ($, on) => {
     const w = world(on);
     w.messages = longConversation().slice(2);

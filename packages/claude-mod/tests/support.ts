@@ -88,6 +88,8 @@ export type WorldOptions = {
   endpoint?: string;
   /** The `TYPESAFE_BASE` override; omit to leave the variable unset. */
   base?: string;
+  /** `CLAUDE_CODE_SESSION_ATTENDED`, set by SDK hosts with a person at the window. */
+  attended?: string;
   consent?: { autoAcknowledged: boolean } | "absent" | unknown;
   mode?: string;
   minimum?: number;
@@ -137,6 +139,9 @@ export function world(on: On, options: WorldOptions = {}): World {
     ...(options.endpoint === undefined ? {} : { COMPACT_ADVISER_TEST_ENDPOINT: options.endpoint }),
     ...(options.disable === undefined ? {} : { COMPACT_ADVISER_DISABLE: options.disable }),
     ...(options.base === undefined ? {} : { TYPESAFE_BASE: options.base }),
+    ...(options.attended === undefined
+      ? {}
+      : { CLAUDE_CODE_SESSION_ATTENDED: options.attended }),
   });
   const consent = "consent" in options ? options.consent : "absent";
   // The plugin store, in memory and visible to the test.

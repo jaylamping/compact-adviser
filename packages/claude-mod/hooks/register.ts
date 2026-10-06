@@ -129,6 +129,20 @@ function isActivated($: EngineInterface): Promise<boolean> {
   return activation;
 }
 
+/**
+ * Whether a person is watching the session. The REPL says so with `isInteractive`; a host
+ * that drives the engine through the SDK for someone at a window (the desktop app's Code
+ * tab) reports `isInteractive: false` but sets `CLAUDE_CODE_SESSION_ATTENDED=1`. A plain
+ * `-p` run sets neither and stays inert.
+ */
+async function isAttended($: EngineInterface, isInteractive: boolean): Promise<boolean> {
+  if (isInteractive) return true;
+  return $.env.get("CLAUDE_CODE_SESSION_ATTENDED").then(
+    (value) => value === "1",
+    () => false,
+  );
+}
+
 async function resolvedKey($: EngineInterface) {
   const fromEnv = await $.env.get("TYPESAFE_API_KEY");
   if (fromEnv !== undefined && fromEnv.trim() !== "") {
@@ -722,7 +736,7 @@ export const register: Register = (on, options) => {
   loadedOptions = options;
   on("session.start", async ($, e, next) => {
     if (!(await isActivated($))) return next(e);
-    interactive = e.isInteractive;
+    interactive = await isAttended($, e.isInteractive);
     if (!interactive) return next(e);
     generation++;
     judging = false;
