@@ -19,6 +19,7 @@ import { DISABLE_ENV, disabledByEnv } from "./disable.ts";
 import { parseDotenvKey, type ResolvedTypesafeApiKey, resolveTypesafeApiKey } from "./env.ts";
 import {
   effectiveBudget,
+  fitState,
   JudgeError,
   judge,
   qualifies,
@@ -190,10 +191,11 @@ async function onStop(payload: HookPayload, environment: Environment): Promise<H
   const fingerprint = await checkpointKey(view.checkpointText);
   if (state.lastHintKey === fingerprint) return {};
 
+  const judgeState = fitState(view.state, profile);
   let loggedBody: string | undefined;
   if (config.logRequests) {
     try {
-      loggedBody = requestBody(view.state, profile);
+      loggedBody = requestBody(judgeState, profile);
       appendRequestLogLine(root, sessionId, requestLogLine(loggedBody));
     } catch {
       // Request logging must not replace or delay the judgment.
@@ -203,7 +205,7 @@ async function onStop(payload: HookPayload, environment: Environment): Promise<H
   let result: Awaited<ReturnType<typeof judge>>;
   try {
     result = await judge(
-      view.state,
+      judgeState,
       key.value,
       {
         ...cancellableJudgeTransport(environment.fetch),
@@ -237,7 +239,7 @@ async function onStop(payload: HookPayload, environment: Environment): Promise<H
         root,
         sessionId,
         responseLogLine(
-          loggedBody ?? requestBody(view.state, profile),
+          loggedBody ?? requestBody(judgeState, profile),
           result,
           fraction,
           undefined,

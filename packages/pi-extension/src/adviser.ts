@@ -19,6 +19,7 @@ import { formatKeyStatus, type ResolvedTypesafeApiKey, resolveTypesafeApiKey } f
 import {
   contextPressure,
   effectiveBudget,
+  fitState,
   floorFor,
   JUDGE_UNAVAILABLE_MESSAGE,
   JudgeError,
@@ -161,7 +162,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
   }
   async function settled(ctx: ExtensionContext) {
     if (!active(ctx)) return;
-    let state = restoreState(ctx.sessionManager.getBranch());
+    let state = restoreState(ctx.sessionManager.getBranch(), now());
     const last = lastResponse(ctx.sessionManager.getBranch());
     if (last?.message.stopReason !== "stop" || state.lastSettled === last.id) return;
     state = { ...state, lastSettled: last.id, completed: state.completed + 1 };
@@ -185,10 +186,11 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
     const profile = parseProfile(config.profile);
     const view = snapshot(ctx, [key(ctx.cwd), savedApiKey(store)]);
     if (view.conversationTokens <= 20000 || view.checkpointKey === state.lastHintKey) return;
+    const judgeState = fitState(view.state, profile);
     let loggedBody: string | undefined;
     if (config.logRequests) {
       try {
-        loggedBody = requestBody(view.state, profile);
+        loggedBody = requestBody(judgeState, profile);
         appendRequestLog(options.agentDir, loggedBody);
       } catch {
         // Request logging must not replace or delay the judgment.
@@ -203,7 +205,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
       !controller.signal.aborted && generation === epoch && sessionIdentity(ctx) === identity;
     try {
       const result = await evaluate(
-        view.state,
+        judgeState,
         key(ctx.cwd)?.trim() ?? "",
         controller.signal,
         profile,
@@ -213,7 +215,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
         try {
           appendResponseLog(
             options.agentDir,
-            loggedBody ?? requestBody(view.state, profile),
+            loggedBody ?? requestBody(judgeState, profile),
             result,
             usageFraction(ctx, config),
             profile,
@@ -264,7 +266,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
             if (lifetime !== owner) return;
             compacting = false;
             automaticCompaction = false;
-            const latestState = restoreState(ctx.sessionManager.getBranch());
+            const latestState = restoreState(ctx.sessionManager.getBranch(), now());
             persist({ ...latestState, retryAfter: now() + 60000 });
             notice(
               ctx,
@@ -359,7 +361,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
   });
   pi.on("model_select", (_event, ctx) => {
     invalidate(ctx);
-    const s = restoreState(ctx.sessionManager.getBranch());
+    const s = restoreState(ctx.sessionManager.getBranch(), now());
     if (active(ctx) && s.compactionId) persist({ ...s, baseline: null });
     refresh(ctx);
   });
@@ -426,7 +428,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
   }
   function status(ctx: ExtensionCommandContext) {
     const c = store.read(),
-      s = restoreState(ctx.sessionManager.getBranch()),
+      s = restoreState(ctx.sessionManager.getBranch(), now()),
       usage = ctx.getContextUsage(),
       t = usage?.tokens,
       u = usageFraction(ctx, c);
@@ -553,7 +555,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
         else if (command === "budget" && value) budget(ctx, value);
         else if (command === "status" && !value) status(ctx);
         else if (["snooze", "dismiss"].includes(command) && !value) {
-          const s = restoreState(ctx.sessionManager.getBranch());
+          const s = restoreState(ctx.sessionManager.getBranch(), now());
           invalidate(ctx);
           persist({ ...s, snoozeUntil: command === "snooze" ? s.completed + 4 : s.snoozeUntil });
           ctx.ui.notify(

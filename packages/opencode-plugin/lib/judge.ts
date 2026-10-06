@@ -1,10 +1,5 @@
 // The TypeSafe Jev judgment: the Pi extension's question set, response validation, and
-// thresholds, sent from the Grok Stop hook through Node's own `fetch`.
-//
-// The question set, `score`, and `floorFor` are a byte-identical copy of the other hosts';
-// packages/pi-extension/test/lockstep.test.ts asserts every package asks and gates the same.
-// `JudgeError` is spelled without a constructor parameter property so Node can run this file
-// through its own type stripping, with no build step in an installed plugin.
+// thresholds, sent through Claude Code's host fetch (`$.http.fetch`), which is injected.
 
 import type { JudgeProfile } from "./profile.ts";
 
@@ -152,9 +147,15 @@ export const JUDGE_UNAVAILABLE_MESSAGE =
   "Context was left unchanged on purpose so a compact or hint cannot come from a bad answer. " +
   "This can be temporary; the adviser will try again later. No action needed unless it keeps repeating.";
 
-export class JudgeError extends Error {
-  readonly kind: JudgeErrorKind;
+export const JUDGE_DISABLED_NETWORK_MESSAGE =
+  "The compact adviser could not ask TypeSafe (Jev): Claude Code has nonessential network traffic disabled. " +
+  "Context was left unchanged on purpose so a compact or hint cannot run without a judgment. " +
+  "Enable nonessential network traffic if TypeSafe should run; this is a configuration setting, not a temporary glitch.";
 
+export class JudgeError extends Error {
+  // A plain field assignment, not a constructor parameter property: the Codex adapter runs
+  // this module through Node's own type stripping, which only erases, never transforms.
+  readonly kind: JudgeErrorKind;
   constructor(kind: JudgeErrorKind, options?: { cause?: unknown }) {
     super(judgeErrorMessage(kind), options);
     this.kind = kind;

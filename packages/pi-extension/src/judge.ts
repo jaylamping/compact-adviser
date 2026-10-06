@@ -286,21 +286,82 @@ export function floorFor(usage: number, profile?: JudgeProfile): number {
 export function qualifies(j: Judgment, usage: number, profile?: JudgeProfile): boolean {
   return score(j, profile) >= floorFor(usage, profile);
 }
-export function requestBody(state: unknown, profile?: JudgeProfile): string {
-  const body = JSON.stringify({
+function serializeRequest(state: unknown, profile?: JudgeProfile): string {
+  return JSON.stringify({
     model: "jev-latest",
     state,
     questions: profile?.questions ?? QUESTIONS,
   });
+}
+
+export function requestBody(state: unknown, profile?: JudgeProfile): string {
+  const body = serializeRequest(state, profile);
   if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new JudgeError("input");
   return body;
 }
+
+/** Entries `fitState` keeps in each list before it moves on to the next one. */
+const FIT_KEEP_RECENT = 8;
+const FIT_KEEP_USERS = 2;
+
+/**
+ * Shrinks a snapshot-shaped state until its request body fits `MAX_REQUEST_BYTES`.
+ *
+ * The snapshot budgets count raw text bytes, but JSON escaping (Windows backslash paths,
+ * quotes, newlines) and each entry's wrapper are counted only here, so a long session can
+ * serialize past the cap and fail the same way on every turn. Drops, oldest first: recent
+ * entries down to eight, user constraints down to two, recent entries down to one, the
+ * prior summary, then the saved-artifact names. Each drop is recorded in the coverage
+ * fields the state already has. A state that fits, or is not shaped like a snapshot, comes
+ * back as it was; one that still does not fit is left for `requestBody` to refuse.
+ */
+export function fitState<T>(state: T, profile?: JudgeProfile): T {
+  const fits = (s: unknown) => Buffer.byteLength(serializeRequest(s, profile)) <= MAX_REQUEST_BYTES;
+  if (fits(state) || !state || typeof state !== "object" || Array.isArray(state)) return state;
+  const s: Record<string, unknown> = { ...(state as Record<string, unknown>) };
+  const coverage =
+    s.coverage && typeof s.coverage === "object" && !Array.isArray(s.coverage)
+      ? { ...(s.coverage as Record<string, unknown>) }
+      : undefined;
+  if (coverage) s.coverage = coverage;
+  const recent = Array.isArray(s.recent) ? [...s.recent] : undefined;
+  const users = Array.isArray(s.userConstraints) ? [...s.userConstraints] : undefined;
+  if (recent) s.recent = recent;
+  if (users) s.userConstraints = users;
+  const dropRecent = (keep: number) => {
+    while (recent && recent.length > keep && !fits(s)) {
+      recent.shift();
+      if (coverage && typeof coverage.olderMessagesOmitted === "number")
+        coverage.olderMessagesOmitted++;
+      if (coverage && "recentTextTruncated" in coverage) coverage.recentTextTruncated = true;
+    }
+  };
+  const dropUsers = (keep: number) => {
+    while (users && users.length > keep && !fits(s)) {
+      users.shift();
+      if (coverage && typeof coverage.omittedUserMessages === "number")
+        coverage.omittedUserMessages++;
+    }
+  };
+  dropRecent(FIT_KEEP_RECENT);
+  dropUsers(FIT_KEEP_USERS);
+  dropRecent(1);
+  if (!fits(s) && typeof s.previousSummary === "string" && s.previousSummary !== "")
+    s.previousSummary = "";
+  if (!fits(s) && Array.isArray(s.savedArtifacts) && s.savedArtifacts.length > 0)
+    s.savedArtifacts = [];
+  return s as T;
+}
+
+/** A cold TLS handshake or a corporate proxy regularly takes longer than two seconds. */
+export const TIMEOUT_MS = 5000;
+
 export async function judge(
   state: unknown,
   key: string,
   signal: AbortSignal,
   transport: typeof fetch = fetch,
-  timeoutMs = 2000,
+  timeoutMs = TIMEOUT_MS,
   profile?: JudgeProfile,
   endpoint = ENDPOINT,
 ): Promise<Judgment> {

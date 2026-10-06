@@ -1,10 +1,6 @@
-// The bounded, text-only judge input, following the Pi extension's snapshot: user
-// constraints, the recent tail, the prior summary, saved artifact names, and explicit
-// coverage markers. The messages come from Grok's `chat_history.jsonl` (see transcript.ts);
-// nothing here reads a file or knows which host it runs on.
-//
-// The redaction and clipping helpers are a copy of the other hosts';
-// packages/pi-extension/test/lockstep.test.ts asserts they scrub identically.
+// The bounded, text-only judge input built from `$.session.messages()`, following the
+// Pi extension's snapshot: user constraints, the recent tail, the prior summary, saved
+// artifact names, and explicit coverage markers. Nothing here touches the engine.
 
 export interface ToolUseLike {
   tool_use_id?: string;
@@ -21,28 +17,16 @@ export interface MessageLike {
   toolResults?: readonly { text: string; isError: boolean }[];
 }
 
-/** The transcript reader answers at most this many; a full answer means older ones exist. */
+/** `$.session.messages()` answers at most this many; a full answer means older ones exist. */
 export const MESSAGE_LIMIT = 4096;
-/** Recent transcript entries considered for the TypeSafe/Jev snapshot, including assistant tool results. */
+/** Recent `$.session.messages()` entries considered for the TypeSafe/Jev snapshot, including assistant tool results. */
 export const RECENT_TAIL_MESSAGES = 64;
 /** Per-tool-result byte cap inside the recent tail; long results are middle-truncated. */
 export const TOOL_RESULT_BUDGET = 512;
 export const SUMMARY_PREFIX = "This session is being continued from a previous conversation";
-/** Grok's own writing tools, plus the Claude names its matcher aliases accept. */
-const WRITE_TOOLS = new Set([
-  "search_replace",
-  "write_file",
-  "create_file",
-  "edit_file",
-  "apply_patch",
-  "notebook_edit",
-  "Write",
-  "Edit",
-  "MultiEdit",
-  "NotebookEdit",
-]);
-/** Grok's shell tool, whose `command` input may write files itself. */
-const SHELL_TOOLS = new Set(["run_terminal_command"]);
+const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+/** Claude Code's shell tool, whose `command` input may write files itself. */
+const SHELL_TOOLS = new Set(["Bash"]);
 
 interface ShellWord {
   text: string;
@@ -619,7 +603,6 @@ export interface Snapshot {
 export function snapshot(
   messages: readonly MessageLike[],
   secrets: readonly (string | undefined)[] = [],
-  hasImages = false,
 ): Snapshot {
   const artifacts = new Set<string>();
   let redacted = false;
@@ -710,8 +693,8 @@ export function snapshot(
       omittedUserMessages: omittedUsers,
       olderMessagesOmitted: Math.max(0, messages.length - RECENT_TAIL_MESSAGES),
       recentTextTruncated: recentTruncated,
-      // chat_history.jsonl carries typed content blocks; transcript.ts reports image blocks.
-      hasImages,
+      // Claude Code's transcript view carries text only; images cannot be detected here.
+      hasImages: false,
       redacted,
       transcriptLimitReached,
     },

@@ -1,6 +1,6 @@
-// Per-session cooldown facts, the Codex counterpart of the Pi extension's session entries.
-// The Codex hook is a fresh process at every event, so every fact a cooldown depends on is
-// read back from one JSON file per session under the adviser's own settings directory.
+// Per-session cooldown facts, the Claude Code counterpart of the Pi extension's session
+// entries. They live in the plugin's own store under `session:<id>`, so a restart, a hot
+// reload, or a mode change never resets a session's cooldowns.
 
 export const SESSION_PREFIX = "session:";
 export const SESSION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;

@@ -51,6 +51,44 @@ test("every package sends byte-identical request bodies", () => {
   }
 });
 
+test("every package fits an oversized Windows-path state to the same request body", () => {
+  const path = String.raw`C:\Users\me\code\project\src\components\widget\index.ts`;
+  const oversized = {
+    userConstraints: Array.from({ length: 6 }, (_, i) => ({
+      role: "user",
+      text: `Constraint ${i}: keep ${path} "as is". `.repeat(20),
+    })),
+    recent: Array.from({ length: 30 }, (_, i) => ({
+      role: "assistant",
+      text: `Step ${i} edited ${path}\n`.repeat(15),
+      tools: [{ tool: "Bash", error: false, excerpt: `type ${path}` }],
+    })),
+    previousSummary: `Earlier work on ${path}. `.repeat(40),
+    savedArtifacts: [path, `${path}.bak`],
+    coverage: {
+      userConstraints: true,
+      recent: true,
+      olderMessagesOmitted: 0,
+      omittedUserMessages: 0,
+      recentTextTruncated: false,
+    },
+    compaction: { native: 0 },
+  };
+  assert.ok(Buffer.byteLength(JSON.stringify(oversized)) > pi.MAX_REQUEST_BYTES);
+  assert.throws(() => pi.requestBody(oversized));
+  const body = pi.requestBody(pi.fitState(oversized));
+  assert.ok(Buffer.byteLength(body) <= pi.MAX_REQUEST_BYTES);
+  const fitted = JSON.parse(body).state;
+  assert.ok(fitted.recent.length >= 1 && fitted.recent.length < oversized.recent.length);
+  assert.ok(fitted.coverage.olderMessagesOmitted > 0);
+  assert.equal(oversized.recent.length, 30, "the input state is not mutated");
+  for (const other of [claude, codex, grok]) {
+    assert.equal(other.requestBody(other.fitState(oversized)), body);
+  }
+  // A state that already fits comes back unchanged.
+  for (const other of [claude, codex, grok, pi]) assert.equal(other.fitState(state), state);
+});
+
 test("the question set and the floor schedule match", () => {
   for (const other of [claude, codex, grok]) {
     assert.deepEqual(other.QUESTIONS, pi.QUESTIONS);
@@ -77,7 +115,9 @@ test("the question set and the floor schedule match", () => {
     }
     assert.equal(other.ENDPOINT, pi.ENDPOINT);
     assert.equal(other.MAX_REQUEST_BYTES, pi.MAX_REQUEST_BYTES);
+    assert.equal(other.TIMEOUT_MS, pi.TIMEOUT_MS);
   }
+  assert.equal(pi.TIMEOUT_MS, 5000);
   assert.deepEqual(Object.keys(pi.QUESTIONS), ["done", "shape"]);
   // A budget only relaxes the floor: below the limit it is the denominator, at or above it is ignored.
   assert.equal(pi.contextPressure(300000, 1000000, 450000), 300000 / 450000);
@@ -352,6 +392,38 @@ test("every package scrubs owned settings fields and known key values the same w
   }
   assert.ok(!claudeSnapshot.redact(dump).text.includes(secret));
   assert.ok(claudeSnapshot.redact(dump).text.includes("hint"));
+});
+
+test("every package redacts named secrets the same way", () => {
+  const inputs = [
+    '{"API_KEY": "s3cret-value"}',
+    "password=hunter2",
+    "AWS_SECRET_ACCESS_KEY=AKIAexample123",
+    "setx TYPESAFE_API_KEY tsk-setx-value",
+    "Context tokens: 52000 of 200000",
+    "max_tokens: 4096",
+  ];
+  for (const input of inputs) {
+    const expected = piContext.redact(input);
+    for (const other of [claudeSnapshot, codexSnapshot, grokSnapshot]) {
+      assert.deepEqual(other.redact(input), expected, input);
+    }
+  }
+  assert.deepEqual(piContext.redact('{"API_KEY": "s3cret-value"}'), {
+    text: '{"API_KEY": "[REDACTED]"}',
+    redacted: true,
+  });
+  for (const [input, secret] of [
+    ["password=hunter2", "hunter2"],
+    ["AWS_SECRET_ACCESS_KEY=AKIAexample123", "AKIAexample123"],
+    ["setx TYPESAFE_API_KEY tsk-setx-value", "tsk-setx-value"],
+  ]) {
+    const out = piContext.redact(input);
+    assert.ok(out.redacted && !out.text.includes(secret), input);
+  }
+  for (const input of ["Context tokens: 52000 of 200000", "max_tokens: 4096"]) {
+    assert.deepEqual(piContext.redact(input), { text: input, redacted: false }, input);
+  }
 });
 
 test("every package writes the same TypeSafe log line shape", () => {

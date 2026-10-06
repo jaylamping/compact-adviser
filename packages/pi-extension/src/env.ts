@@ -18,17 +18,40 @@ function unquote(value: string): string {
   return value;
 }
 
-/** Last `KEY=VALUE` assignment wins. Comments and blank lines are ignored. */
+/**
+ * Drops an inline comment as dotenv tools do: a quoted value ends at its closing quote, an
+ * unquoted one at ` #`.
+ */
+function stripInlineComment(value: string): string {
+  const quote = value[0];
+  if (quote === '"' || quote === "'") {
+    const close = value.indexOf(quote, 1);
+    return close > 0 ? value.slice(0, close + 1) : value;
+  }
+  return value.replace(/\s+#.*$/, "");
+}
+
+/**
+ * Last `KEY=VALUE` assignment wins. Comments and blank lines are ignored. A file saved as
+ * UTF-16 (Windows PowerShell 5.1 `>` / `Out-File`) and read as UTF-8 carries a NUL after
+ * every ASCII character and its byte-order mark as replacement characters; both are dropped.
+ */
 export function parseDotenvKey(text: string, name: string): string | undefined {
   let found: string | undefined;
-  for (const raw of text.split(/\r?\n/)) {
+  const decoded = text.includes("\u0000")
+    ? text
+        .split("\u0000")
+        .join("")
+        .replace(/^(?:\uFFFD{1,2}|\uFEFF)/, "")
+    : text;
+  for (const raw of decoded.split(/\r?\n/)) {
     let line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     line = line.replace(PREFIX, "");
     const eq = line.indexOf("=");
     if (eq <= 0) continue;
     if (line.slice(0, eq).trim() !== name) continue;
-    found = unquote(line.slice(eq + 1).trim());
+    found = unquote(stripInlineComment(line.slice(eq + 1).trim()));
   }
   return found;
 }

@@ -1,5 +1,7 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 export const STATE_TYPE = "compact-adviser:state";
+/** The longest TypeSafe backoff the adviser ever sets. */
+export const MAX_BACKOFF_MS = 300000;
 export interface SessionState {
   version: 1;
   compactionId: string | null;
@@ -29,7 +31,10 @@ export function initialState(compaction: string | null): SessionState {
     failures: 0,
   };
 }
-export function restoreState(branch: readonly SessionEntry[]): SessionState {
+export function restoreState(
+  branch: readonly SessionEntry[],
+  now: number = Date.now(),
+): SessionState {
   const compact = compactionId(branch);
   const entry = [...branch]
     .reverse()
@@ -49,7 +54,9 @@ export function restoreState(branch: readonly SessionEntry[]): SessionState {
   ) {
     return { ...initialState(compact), snoozeUntil: 3 };
   }
-  return { ...s };
+  // No backoff is ever longer than MAX_BACKOFF_MS; a record from a skewed clock or a
+  // corrupted write must not block judgments past it.
+  return { ...s, retryAfter: Math.min(s.retryAfter, now + MAX_BACKOFF_MS) };
 }
 export function lastResponse(branch: readonly SessionEntry[]) {
   for (let i = branch.length - 1; i >= 0; i--) {

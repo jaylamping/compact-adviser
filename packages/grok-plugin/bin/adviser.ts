@@ -51,6 +51,7 @@ import { DISABLE_ENV, disabledByEnv } from "../lib/disable.ts";
 import { formatKeyStatus, parseDotenvKey, resolveTypesafeApiKey } from "../lib/env.ts";
 import {
   effectiveBudget,
+  fitState,
   floorFor,
   JudgeError,
   judge,
@@ -357,10 +358,11 @@ async function runStop(payload: HookPayload): Promise<void> {
   const fingerprint = checkpointKey(view.checkpointText);
   if (state.lastHintKey === fingerprint) return;
 
+  const judgeState = fitState(view.state, profile);
   let loggedBody: string | undefined;
   if (settings.logRequests) {
     try {
-      loggedBody = requestBody(view.state, profile);
+      loggedBody = requestBody(judgeState, profile);
       appendLog(sessionId, requestLogLine(loggedBody));
     } catch {
       // A body too large to send is reported by `judge` below; logging does not decide.
@@ -369,7 +371,7 @@ async function runStop(payload: HookPayload): Promise<void> {
   let judgment: Awaited<ReturnType<typeof judge>>;
   try {
     judgment = await judge(
-      view.state,
+      judgeState,
       activeKey,
       {
         ...cancellableJudgeTransport(),
@@ -392,7 +394,7 @@ async function runStop(payload: HookPayload): Promise<void> {
     appendLog(
       sessionId,
       responseLogLine(
-        loggedBody ?? requestBody(view.state, profile),
+        loggedBody ?? requestBody(judgeState, profile),
         judgment,
         fraction,
         undefined,
